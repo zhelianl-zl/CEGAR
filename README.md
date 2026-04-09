@@ -68,7 +68,7 @@ python train.py \
   --stage1_epochs 60 --stage2_epochs 0 \
   --ecg_conf_type pmax \
   --ecg_lam_start auto_tr_autocap --ecg_lam_end 0.05 \
-  --ecg_tau_start auto_q_valley --ecg_tau_end 0.36 \
+  --ecg_tau_start auto_q_valley --ecg_tau_end 0.xx \
   --ecg_k_start 20 --ecg_k_end 20 \
   --ecg_schedule linear
 ```
