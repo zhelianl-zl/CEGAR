@@ -1,43 +1,69 @@
-# ECG Loss — Equalized Cross-Gating Gradient Scaling
+# CEGAR — Confident-Error Gradient Amplification for Robustness
 
-ECG Loss is a per-sample gradient scaling method for deep classification. It up-weights the gradient contribution of hard, uncertain samples relative to confident ones, guided by a confidence gate derived from the model's own output distribution. The result is a smooth, adaptive emphasis on samples near the decision boundary without discarding any training signal.
+CEGAR is a lightweight training method for deep classification that improves robustness by reallocating gradient budget toward **confident mistakes**. Instead of changing the forward objective, CEGAR keeps standard cross-entropy (CE) unchanged and rescales only the backward gradients on a per-sample basis. This makes it easy to plug into ordinary CE training while staying close to CE in wall time, memory use, and clean-error behavior.
+
+The core idea is simple: not all mistakes are equally informative. A wrong prediction made with low confidence is often already near the decision boundary and is usually handled reasonably well by standard CE gradients. By contrast, a wrong prediction made with high confidence indicates a sharper and more dangerous failure: the model places a strong probability peak on the wrong class while appearing trustworthy. CEGAR detects such cases online and amplifies their training signal, while leaving other samples close to standard CE.
+
+This repository also includes **Auto-CEGAR**, which removes most of the manual scheduling burden by adapting the confidence boundary and amplification strength automatically from running confidence statistics.
 
 ## Method Overview
 
-For each sample in a minibatch, ECG computes a **confidence gate** from the model's current prediction and uses it to scale the backward gradients:
+For each sample in a minibatch, CEGAR computes a per-sample gate and uses it to scale the backward gradient:
 
+```text
+wrong_gate_i = 1 - p_y,i
+conf_gate_i  = sigmoid(k · (conf_i - τ))
+gate_i       = wrong_gate_i × conf_gate_i
+scale_i      = 1 + λ · gate_i
 ```
-gate_i  = wrong_gate_i × conf_gate_i
-scale_i = 1 + λ · gate_i
-```
 
-- `wrong_gate_i` — 1 minus the probability assigned to the true class, so mis-classified samples receive a stronger signal.
-- `conf_gate_i` — sigmoid sharpening around a threshold τ, which separates low-confidence (uncertain) samples from high-confidence ones.
-- `λ` — scaling strength, either fixed or controlled by an **auto-lambda** controller that keeps the mean gate contribution at a target level.
-- `τ` — confidence threshold, either fixed or adapted per epoch by **auto\_q\_valley**, which detects the valley between the low- and high-confidence modes of the confidence histogram automatically.
+where:
 
-The forward loss (cross-entropy) is unchanged; only the backward gradients are rescaled. An optional `scale_normalize` step keeps the global step size constant while redistributing gradient mass toward harder samples.
+- `p_y,i` is the predicted probability of the true class.
+- `conf_i` is the confidence signal, typically `pmax`.
+- `τ` is the confidence boundary.
+- `k` controls the sharpness of the confidence gate.
+- `λ` controls the amplification strength.
+
+The forward CE loss is unchanged. Only the backward gradient magnitude is rescaled through a custom autograd operator. An optional normalization step keeps the mean scale near 1, so CEGAR redistributes gradient mass without substantially changing the global step size.
+
+## Auto-CEGAR
+
+Manual CEGAR can require schedules for `λ`, `τ`, and `k`. Auto-CEGAR reduces this burden by:
+
+- fixing `k` as a stable gate sharpness,
+- adapting `τ` from the evolving confidence distribution,
+- adapting `λ` from running gate and tail statistics.
+
+This repository includes several automatic controllers, including:
+
+- **`auto_q_valley`**: updates the confidence boundary from the valley of the per-epoch confidence histogram,
+- **tail-based lambda control**: adjusts amplification strength from the active high-confidence-error region,
+- **adaptive runtime cap**: limits amplification when the gate becomes unhealthy or overly sparse.
+
+In practice, this turns CEGAR from a conceptually simple but manually awkward method into a usable training recipe.
 
 ## Key Features
 
-- **auto\_q\_valley**: automatic τ scheduling — finds the valley in the per-epoch confidence histogram, no manual threshold tuning required.
-- **Auto-lambda**: keeps mean gate strength at a user-defined target, adapting λ to the current training dynamics.
-- **Multi-dataset**: CIFAR-10, CIFAR-100, SVHN, BinaryCIFAR-10, ImageNet-32 (SmallImageNet).
-- **Robust training**: PGD-AT, TRADES, and MART robust training integrated.
-- **Adversarial evaluation**: FGSM, PGD-Linf, and PGD-Linf with random start (per-dataset ε in pixel scale).
-- **Corruption evaluation**: CIFAR-C / CIFAR-100-C with configurable corruption list and severity level.
+- **Forward-unchanged CE**: keeps the standard CE objective and modifies only the backward gradient scale.
+- **Confidence-aware emphasis**: focuses on samples that are both wrong and confident.
+- **Auto-CEGAR controllers**: automatic boundary and amplification control from online confidence statistics.
+- **Multi-dataset support**: CIFAR-10, CIFAR-100, SVHN, BinaryCIFAR-10, and ImageNet-32.
+- **Robust-training baselines**: PGD-AT, TRADES, MART, and focal loss.
+- **Adversarial evaluation**: FGSM, PGD-Linf, and PGD-Linf with random start.
+- **Corruption evaluation**: CIFAR-C / CIFAR-100-C with configurable corruption lists and severity levels.
 - **TSV-based sweep dispatch**: grid/list experiments via tab-separated config files; each row runs as an independent Slurm array task.
 
 ## Repository Structure
 
-```
+```text
 train.py               # Main training entry point
-ecg_loss.py            # ECG loss, confidence gate, auto_q_valley controller
-robust_losses.py       # TRADES / MART / PGD-AT loss functions
+ecg_loss.py            # CEGAR loss, confidence gate, Auto-CEGAR controllers
+robust_losses.py       # TRADES / MART / PGD-AT / focal loss
 models.py              # Model definitions (ResNet variants, WideResNet)
 run.py                 # Local parallel launcher (multi-GPU, research use)
 tools/
-  eval_checkpoints.py  # Adversarial & corruption evaluation tool
+  eval_checkpoints.py  # Adversarial and corruption evaluation
   run_from_tsv.py      # TSV-to-CLI sweep dispatcher
 scripts/
   cegs_array.sbatch    # Slurm array job template (PSC Bridges-2)
@@ -57,7 +83,7 @@ ImageNet-32 requires the SmallImageNet pickle dataset. Set the environment varia
 
 ## Quick Start
 
-**Standard ECG training on CIFAR-10 (60 epochs):**
+### Standard CEGAR training on CIFAR-10
 
 ```bash
 python train.py \
@@ -73,10 +99,10 @@ python train.py \
   --ecg_schedule linear
 ```
 
-**TSV-based sweep (recommended for multi-run experiments):**
+### TSV-based sweep
 
 ```bash
-# Edit sweeps/your_config.tsv, then dispatch via Slurm:
+# Edit sweeps/your_config.tsv, then dispatch via Slurm
 sbatch --array=0-N scripts/cegs_array.sbatch
 ```
 
@@ -87,9 +113,12 @@ python tools/eval_checkpoints.py \
   --run_dir /path/to/run \
   --attacks fgsm,pgd_linf,pgd_linf_rs \
   --adv_eps 8 --adv_steps 20 \
-  --c_corruptions gaussian_noise,shot_noise,... --c_severity 5
+  --c_corruptions gaussian_noise,shot_noise,... \
+  --c_severity 5
 ```
+
+All adversarial attacks are run in pixel space `[0, 1]` with proper clamping. The evaluation tool also supports checkpoint directories, Slurm job lookup, and optional corruption-suite evaluation.
 
 ## Citation
 
-If you use this code, please cite the associated paper (forthcoming).
+If you use this repository, please cite the associated paper once it is publicly available.
